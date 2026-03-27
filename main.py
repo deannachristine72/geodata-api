@@ -26,10 +26,8 @@ from pathlib import Path
 from typing import Optional
 
 import duckdb
-import pyarrow.parquet as pq
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -155,18 +153,21 @@ async def lifespan(app: FastAPI):
         app_state.heatmap_per_year = json.load(f)
 
     # Muat geometri kota boundary ke dict — hasc_code -> geometry dict (pre-parsed)
-    # Pre-parsing JSON di startup jauh lebih efisien daripada parse per-request
-    kota_table = pq.read_table(PARQUET_KOTA)
-    kota_dict = kota_table.to_pydict()
-    for i in range(len(kota_dict["hasc_code"])):
-        hasc = kota_dict["hasc_code"][i]
+    # Gunakan DuckDB langsung (tanpa PyArrow) — konsisten dengan stack yang digunakan
+    con = get_con()
+    kota_rows = con.sql(f"""
+        SELECT hasc_code, geometry_geojson, id_kota, provinsi, kota_name, kota_type
+        FROM read_parquet('{PARQUET_KOTA.as_posix()}')
+        WHERE hasc_code IS NOT NULL
+    """).fetchall()
+    for hasc, geom_json, id_kota, provinsi, kota_name, kota_type in kota_rows:
         if hasc:
-            app_state.kota_geometries[hasc] = json.loads(kota_dict["geometry_geojson"][i])
+            app_state.kota_geometries[hasc] = json.loads(geom_json)
             app_state.kota_meta[hasc] = {
-                "id_kota":   kota_dict["id_kota"][i],
-                "provinsi":  kota_dict["provinsi"][i],
-                "kota_name": kota_dict["kota_name"][i],
-                "kota_type": kota_dict["kota_type"][i],
+                "id_kota":   id_kota,
+                "provinsi":  provinsi,
+                "kota_name": kota_name,
+                "kota_type": kota_type,
             }
 
     # Baca jumlah total baris deforestasi
@@ -208,9 +209,6 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
-
-# GZip — kompres response > 1KB secara otomatis (mengurangi payload 70-80%)
-app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # CORS — izinkan semua origin untuk development (batasi di production)
 app.add_middleware(
@@ -319,7 +317,12 @@ async def get_years():
         {"year": yr, "count": cnt}
         for yr, cnt in sorted(year_counts.items())
     ]
-    return {"years": result}
+    payload = json.dumps({"years": result}, ensure_ascii=False).encode("utf-8")
+    return Response(
+        content=gzip.compress(payload, compresslevel=6),
+        media_type="application/json",
+        headers={"Content-Encoding": "gzip"},
+    )
 
 
 # ─── Endpoint: Polygon Deforestasi dalam Viewport ─────────────────────────────
@@ -373,7 +376,7 @@ async def get_polygons(
             },
         })
 
-    return {
+    fc = {
         "type": "FeatureCollection",
         "features": features,
         "meta": {
@@ -384,6 +387,12 @@ async def get_polygons(
             "limit":     limit,
         },
     }
+    payload = json.dumps(fc, ensure_ascii=False).encode("utf-8")
+    return Response(
+        content=gzip.compress(payload, compresslevel=6),
+        media_type="application/json",
+        headers={"Content-Encoding": "gzip"},
+    )
 
 
 # ─── Endpoint: Heatmap Deforestasi per Kab/Kota ───────────────────────────────
@@ -408,7 +417,6 @@ async def get_heatmap_kota(
     Data dari cache pre-compressed saat startup — tidak ada DuckDB query atau
     serialisasi saat runtime. Response time < 10ms.
     """
-    from fastapi import Request
     cache_key = str(year) if year is not None else "all"
 
     if cache_key not in app_state._heatmap_cache:
