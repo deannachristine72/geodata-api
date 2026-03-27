@@ -29,7 +29,6 @@ import duckdb
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel
 
 # ─── Konfigurasi Path ─────────────────────────────────────────────────────────
 # DATA_DIR: default ke ./data (relatif terhadap main.py), bisa di-override via env var
