@@ -60,7 +60,7 @@ def get_con() -> duckdb.DuckDBPyConnection:
     """
     if not hasattr(_thread_local, "con"):
         con = duckdb.connect(database=":memory:", read_only=False)
-        con.execute("LOAD spatial;")
+        con.execute("INSTALL spatial; LOAD spatial;")
         _thread_local.con = con
     return _thread_local.con
 
@@ -72,6 +72,7 @@ class AppState:
     kota_meta: dict[str, dict] = {}          # hasc_code → {id_kota, provinsi, kota_name, kota_type}
     total_deforest_rows: int = 0
     available_years: list[int] = []
+    ready: bool = False  # True setelah semua data selesai dimuat
     # Cache heatmap sebagai gzip-compressed bytes, siap dikirim langsung ke client
     # Key: cache_key ("all" atau "2024"), Value: gzip bytes
     _heatmap_cache: dict[str, bytes] = {}
@@ -190,6 +191,7 @@ async def lifespan(app: FastAPI):
     total = len(app_state._heatmap_cache)
     compressed_kb = sum(len(v) for v in app_state._heatmap_cache.values()) / 1024
     print(f"[startup] Heatmap cache    : {total} entries, {compressed_kb:.0f} KB total compressed")
+    app_state.ready = True
     print("[startup] Siap melayani request.")
 
     yield  # aplikasi berjalan
@@ -287,6 +289,13 @@ def _query_polygons(
 # ─── Endpoint: Health Check ────────────────────────────────────────────────────
 @app.get("/health", summary="Status server dan ringkasan data")
 async def health_check():
+    if not app_state.ready:
+        # Startup masih berjalan — kembalikan 503 agar Railway terus retry
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=503,
+            content={"status": "starting", "message": "Data masih dimuat..."}
+        )
     return {
         "status": "ok",
         "total_deforest_rows": app_state.total_deforest_rows,

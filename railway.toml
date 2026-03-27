@@ -1,9 +1,12 @@
 [build]
 builder = "nixpacks"
+# Pre-install DuckDB spatial extension selama build agar tidak download saat runtime
+buildCommand = "pip install -r requirements.txt && python -c \"import duckdb; c=duckdb.connect(); c.execute('INSTALL spatial;'); print('[build] DuckDB spatial extension installed')\""
 
 [deploy]
 startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1"
 healthcheckPath = "/health"
-healthcheckTimeout = 120
+# 300s = 5 menit — cukup untuk startup (load parquet + pre-compute heatmap)
+healthcheckTimeout = 300
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
