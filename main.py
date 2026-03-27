@@ -427,3 +427,209 @@ async def get_heatmap_kota(
         media_type="application/json",
         headers={"Content-Encoding": "gzip"},
     )
+
+
+# ─── Helper: Query Centroid Points ───────────────────────────────────────────
+def _query_centroids(
+    min_lon: float, max_lon: float,
+    min_lat: float, max_lat: float,
+    year: Optional[int],
+    limit: int,
+) -> list[tuple]:
+    """Query centroid points (tanpa geometry) — jauh lebih ringan dari polygon."""
+    con = get_con()
+    year_clause = f"AND year = {year}" if year is not None else ""
+    sql = f"""
+    SELECT
+        centroid_lon,
+        centroid_lat,
+        ROUND(area_km2, 4) AS area_km2,
+        year,
+        uuid
+    FROM read_parquet('{PARQUET_DEFOREST.as_posix()}')
+    WHERE centroid_lon BETWEEN {min_lon} AND {max_lon}
+      AND centroid_lat BETWEEN {min_lat} AND {max_lat}
+      {year_clause}
+    ORDER BY area_km2 DESC
+    LIMIT {limit}
+    """
+    return con.sql(sql).fetchall()
+
+
+# ─── Endpoint: Centroid Points dalam Viewport ────────────────────────────────
+@app.get("/api/centroids", summary="Titik centroid deforestasi dalam bounding box viewport")
+async def get_centroids(
+    min_lon: float = Query(..., ge=-180, le=180),
+    min_lat: float = Query(..., ge=-90, le=90),
+    max_lon: float = Query(..., ge=-180, le=180),
+    max_lat: float = Query(..., ge=-90, le=90),
+    year: Optional[int] = Query(None, ge=2000, le=2030),
+    limit: int = Query(8000, ge=1, le=15000),
+):
+    """
+    Kembalikan centroid points (lon, lat, area, year, uuid) dalam viewport.
+    Jauh lebih ringan dari /api/polygons — tanpa geometry processing.
+    """
+    if min_lon >= max_lon:
+        raise HTTPException(400, "min_lon harus lebih kecil dari max_lon")
+    if min_lat >= max_lat:
+        raise HTTPException(400, "min_lat harus lebih kecil dari max_lat")
+
+    import asyncio
+    rows = await asyncio.to_thread(
+        _query_centroids,
+        min_lon, max_lon, min_lat, max_lat,
+        year, limit,
+    )
+
+    # Format array-of-arrays untuk minimisasi payload
+    points = [[lon, lat, area, yr, uid] for lon, lat, area, yr, uid in rows]
+
+    result = {
+        "points": points,
+        "meta": {
+            "count": len(points),
+            "year": year,
+            "bbox": [min_lon, min_lat, max_lon, max_lat],
+            "limit": limit,
+        },
+    }
+    payload = json.dumps(result, ensure_ascii=False).encode("utf-8")
+    return Response(
+        content=gzip.compress(payload, compresslevel=6),
+        media_type="application/json",
+        headers={"Content-Encoding": "gzip"},
+    )
+
+
+# ─── Endpoint: Daftar Kota untuk Search Autocomplete ─────────────────────────
+@app.get("/api/search/kota", summary="Daftar kota/kabupaten untuk search autocomplete")
+async def search_kota():
+    """
+    Kembalikan seluruh 386 kota beserta centroid dan bbox untuk frontend search.
+    Data sudah di-memory — response time < 5ms.
+    """
+    kota_list = []
+    for hasc_code, meta in app_state.kota_meta.items():
+        geom = app_state.kota_geometries.get(hasc_code)
+        if not geom:
+            continue
+
+        # Hitung bbox dan centroid dari geometry coordinates
+        all_lons = []
+        all_lats = []
+        coords = geom.get("coordinates", [])
+        geom_type = geom.get("type", "")
+
+        if geom_type == "MultiPolygon":
+            for polygon in coords:
+                for ring in polygon:
+                    for pt in ring:
+                        all_lons.append(pt[0])
+                        all_lats.append(pt[1])
+        elif geom_type == "Polygon":
+            for ring in coords:
+                for pt in ring:
+                    all_lons.append(pt[0])
+                    all_lats.append(pt[1])
+
+        if not all_lons:
+            continue
+
+        min_lon = min(all_lons)
+        max_lon = max(all_lons)
+        min_lat = min(all_lats)
+        max_lat = max(all_lats)
+
+        kota_list.append({
+            "hasc_code": hasc_code,
+            "kota_name": meta.get("kota_name", ""),
+            "kota_type": meta.get("kota_type", ""),
+            "provinsi": meta.get("provinsi", ""),
+            "centroid": [round((min_lon + max_lon) / 2, 4), round((min_lat + max_lat) / 2, 4)],
+            "bbox": [round(min_lon, 4), round(min_lat, 4), round(max_lon, 4), round(max_lat, 4)],
+        })
+
+    kota_list.sort(key=lambda k: (k["provinsi"], k["kota_name"]))
+
+    payload = json.dumps({"kota": kota_list}, ensure_ascii=False).encode("utf-8")
+    return Response(
+        content=gzip.compress(payload, compresslevel=6),
+        media_type="application/json",
+        headers={"Content-Encoding": "gzip"},
+    )
+
+
+# ─── Helper: Query Statistik Agregasi ────────────────────────────────────────
+def _query_stats(year: Optional[int]) -> dict:
+    """Query statistik agregasi dari parquet."""
+    con = get_con()
+    year_clause = f"WHERE year = {year}" if year is not None else ""
+    sql = f"""
+    SELECT
+        COUNT(*)                     AS total_events,
+        MIN(start_date)              AS date_min,
+        MAX(end_date)                AS date_max,
+        ROUND(AVG(area_km2), 1)     AS avg_area_km2,
+        ROUND(MAX(area_km2), 1)     AS max_area_km2,
+        ROUND(SUM(area_km2), 1)     AS total_area_km2
+    FROM read_parquet('{PARQUET_DEFOREST.as_posix()}')
+    {year_clause}
+    """
+    row = con.sql(sql).fetchone()
+    return {
+        "total_events": row[0],
+        "date_range": [str(row[1]) if row[1] else None, str(row[2]) if row[2] else None],
+        "avg_area_km2": row[3],
+        "max_area_km2": row[4],
+        "total_area_km2": row[5],
+    }
+
+
+# ─── Endpoint: Statistik Ringkasan Deforestasi ───────────────────────────────
+@app.get("/api/stats", summary="Statistik ringkasan deforestasi")
+async def get_stats(
+    year: Optional[int] = Query(None, ge=2000, le=2030),
+):
+    """Kembalikan statistik agregasi: total events, date range, avg/max area."""
+    import asyncio
+    stats = await asyncio.to_thread(_query_stats, year)
+
+    payload = json.dumps(stats, ensure_ascii=False).encode("utf-8")
+    return Response(
+        content=gzip.compress(payload, compresslevel=6),
+        media_type="application/json",
+        headers={"Content-Encoding": "gzip"},
+    )
+
+
+# ─── Endpoint: GeoJSON Boundary Outline Satu Kota ────────────────────────────
+@app.get("/api/boundary/kota/{hasc_code}", summary="GeoJSON boundary outline satu kota/kabupaten")
+async def get_boundary_kota(hasc_code: str):
+    """
+    Kembalikan GeoJSON Feature untuk satu kota berdasarkan hasc_code.
+    Data dari memory — response time < 5ms.
+    """
+    geom = app_state.kota_geometries.get(hasc_code)
+    meta = app_state.kota_meta.get(hasc_code)
+
+    if not geom or not meta:
+        raise HTTPException(404, f"Kota dengan hasc_code '{hasc_code}' tidak ditemukan")
+
+    feature = {
+        "type": "Feature",
+        "geometry": geom,
+        "properties": {
+            "hasc_code": hasc_code,
+            "kota_name": meta.get("kota_name", ""),
+            "provinsi": meta.get("provinsi", ""),
+            "kota_type": meta.get("kota_type", ""),
+        },
+    }
+
+    payload = json.dumps(feature, ensure_ascii=False).encode("utf-8")
+    return Response(
+        content=gzip.compress(payload, compresslevel=6),
+        media_type="application/json",
+        headers={"Content-Encoding": "gzip"},
+    )
