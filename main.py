@@ -162,15 +162,25 @@ async def lifespan(app: FastAPI):
         FROM read_parquet('{PARQUET_KOTA.as_posix()}')
         WHERE hasc_code IS NOT NULL
     """).fetchall()
+    _hasc_seen: dict[str, str] = {}  # hasc -> kota_name pertama (untuk deteksi duplikat)
+    _null_count = 0
     for hasc, geom_json, id_kota, provinsi, kota_name, kota_type in kota_rows:
-        if hasc:
-            app_state.kota_geometries[hasc] = json.loads(geom_json)
-            app_state.kota_meta[hasc] = {
-                "id_kota":   id_kota,
-                "provinsi":  provinsi,
-                "kota_name": kota_name,
-                "kota_type": kota_type,
-            }
+        if not hasc:
+            _null_count += 1
+            continue
+        if hasc in _hasc_seen:
+            print(f"[startup] WARN duplikat hasc={hasc}: '{_hasc_seen[hasc]}' vs '{kota_name} ({provinsi})' — entry ke-2 diabaikan")
+            continue
+        _hasc_seen[hasc] = f"{kota_name} ({provinsi})"
+        app_state.kota_geometries[hasc] = json.loads(geom_json)
+        app_state.kota_meta[hasc] = {
+            "id_kota":   id_kota,
+            "provinsi":  provinsi,
+            "kota_name": kota_name,
+            "kota_type": kota_type,
+        }
+    if _null_count:
+        print(f"[startup] INFO  {_null_count} kota tanpa hasc_code (n.a.) di-skip")
 
     # Baca jumlah total baris deforestasi
     con = get_con()
@@ -182,7 +192,7 @@ async def lifespan(app: FastAPI):
     app_state.available_years = sorted(app_state.heatmap_per_year.keys(), key=int)
 
     print(f"[startup] Deforestasi rows : {app_state.total_deforest_rows:,}")
-    print(f"[startup] Kota boundaries  : {len(app_state.kota_geometries)}")
+    print(f"[startup] Kota boundaries  : {len(app_state.kota_geometries)} unik hasc (dari 394 total GADM)")
     print(f"[startup] Tahun tersedia   : {app_state.available_years[0]}-{app_state.available_years[-1]}")
 
     # Pre-serialize semua heatmap response ke JSON bytes — eliminasi serialisasi per-request
