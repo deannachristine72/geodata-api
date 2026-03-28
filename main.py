@@ -209,10 +209,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — izinkan semua origin untuk development (batasi di production)
+# CORS — default ke domain production, override via env var ALLOWED_ORIGINS
+_default_origins = ["https://geodata-frontend.vercel.app"]
+_origins_env = os.getenv("ALLOWED_ORIGINS", "")
+ALLOWED_ORIGINS = (
+    [o.strip() for o in _origins_env.split(",") if o.strip()]
+    if _origins_env
+    else _default_origins
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["GET"],
     allow_headers=["*"],
 )
