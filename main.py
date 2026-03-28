@@ -26,9 +26,12 @@ from pathlib import Path
 from typing import Optional
 
 import duckdb
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 # ─── Konfigurasi Path ─────────────────────────────────────────────────────────
 # DATA_DIR: default ke ./data (relatif terhadap main.py), bisa di-override via env var
@@ -224,6 +227,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Rate limiting — 60 requests/menit per IP untuk endpoint berat
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 
 # ─── Helper: Toleransi Simplifikasi Berdasarkan Lebar Bbox ────────────────────
 def _simplify_tolerance(min_lon: float, max_lon: float,
@@ -333,7 +341,9 @@ async def get_years():
 
 # ─── Endpoint: Polygon Deforestasi dalam Viewport ─────────────────────────────
 @app.get("/api/polygons", summary="Polygon deforestasi dalam bounding box viewport")
+@limiter.limit("60/minute")
 async def get_polygons(
+    request: Request,
     min_lon: float = Query(..., ge=-180, le=180,  description="Longitude minimum (barat)"),
     min_lat: float = Query(..., ge=-90,  le=90,   description="Latitude minimum (selatan)"),
     max_lon: float = Query(..., ge=-180, le=180,  description="Longitude maksimum (timur)"),
@@ -465,7 +475,9 @@ def _query_centroids(
 
 # ─── Endpoint: Centroid Points dalam Viewport ────────────────────────────────
 @app.get("/api/centroids", summary="Titik centroid deforestasi dalam bounding box viewport")
+@limiter.limit("60/minute")
 async def get_centroids(
+    request: Request,
     min_lon: float = Query(..., ge=-180, le=180),
     min_lat: float = Query(..., ge=-90, le=90),
     max_lon: float = Query(..., ge=-180, le=180),
@@ -595,7 +607,9 @@ def _query_stats(year: Optional[int]) -> dict:
 
 # ─── Endpoint: Statistik Ringkasan Deforestasi ───────────────────────────────
 @app.get("/api/stats", summary="Statistik ringkasan deforestasi")
+@limiter.limit("60/minute")
 async def get_stats(
+    request: Request,
     year: Optional[int] = Query(None, ge=2000, le=2030),
 ):
     """Kembalikan statistik agregasi: total events, date range, avg/max area."""
