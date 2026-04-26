@@ -45,7 +45,7 @@ app = FastAPI(
 )
 
 # CORS — default ke domain production, override via env var ALLOWED_ORIGINS
-_default_origins = ["https://geodata-frontend.vercel.app"]
+_default_origins = ["https://floodmapindonesia.vercel.app"]
 _origins_env = os.getenv("ALLOWED_ORIGINS", "")
 ALLOWED_ORIGINS = (
     [o.strip() for o in _origins_env.split(",") if o.strip()]
