@@ -21,34 +21,35 @@ _thread_local = threading.local()
 
 def get_con() -> duckdb.DuckDBPyConnection:
     if not hasattr(_thread_local, "con"):
-        con = duckdb.connect(database=":memory", read_only=False)
-        con.execute("INSTALL spatial; LOAD spatial")
+        con = duckdb.connect(":memory:")
+        con.execute("INSTALL spatial; LOAD spatial;")
         _thread_local.con = con
     return _thread_local.con
 
 class AppState:
-    heatmap_all_years: list[dict] = []
-    heatmap_per_year: dict[str, list[dict]] = {}
-    kota_geometries: dict[str, dict] = {}
-    kota_meta: dict[str, dict] = {}
-    total_deforest_rows: int = 0
-    available_years: list[int] =[]
-    ready: bool = False
-
-    _heatmap_cache: dict[str, bytes]
-    _heatmap_cache_plain: dict[str, bytes] = {}
+    def __init__(self):
+        self.heatmap_all_years: list[dict] = []
+        self.heatmap_per_year: dict[str, list[dict]] = {}
+        self.kota_geometries: dict[str, dict] = {}
+        self.kota_meta: dict[str, dict] = {}
+        self.total_deforest_rows: int = 0
+        self.available_years: list[int] = []
+        self.ready: bool = False
+        self._heatmap_cache: dict[str, bytes] = {}
+        self._heatmap_cache_plain: dict[str, bytes] = {}
 
 app_state = AppState()
+
 
 def _build_heatmap_json_bytes(year: Optional[int]) -> bytes:
     if year is not None:
         yr_str = str(year)
-        if yr_str not in app_state.heatmap_all_years:
+        if yr_str not in app_state.heatmap_per_year:
             return b'{"type":"FeatureCollection","features":[],"meta":{"year":null,"kota_count":0,"max_records":0}}'
         kota_stats_list = app_state.heatmap_per_year[yr_str]
         kota_stats = {k["hasc_code"]: k for k in kota_stats_list if k.get("hasc_code")}
     else:
-        kota_stats= {
+        kota_stats = {
             k["hasc_code"]: {
                 "kota_name":      k["kota_name"],
                 "provinsi":       k["provinsi"],
@@ -59,20 +60,20 @@ def _build_heatmap_json_bytes(year: Optional[int]) -> bytes:
             for k in app_state.heatmap_all_years
             if k.get("hasc_code")
         }
-    
+
     if not kota_stats:
         return b'{"type":"FeatureCollection","features":[]}'
 
-    max_count   = max(v["record_count"] for v in kota_stats.values()) or 1
-    log_max     = math.log1p(max_count)
+    max_count = max(v["record_count"] for v in kota_stats.values()) or 1
+    log_max   = math.log1p(max_count)
 
     features = []
     for hasc_code, stats in kota_stats.items():
         geom_dict = app_state.kota_geometries.get(hasc_code)
         if not geom_dict:
             continue
-        record_count    = stats["record_count"]
-        intensity       = math.log1p(record_count) / log_max if log_max > 0 else 0.0
+        record_count = stats["record_count"]
+        intensity    = math.log1p(record_count) / log_max if log_max > 0 else 0.0
         features.append({
             "type": "Feature",
             "geometry": geom_dict,
@@ -89,9 +90,8 @@ def _build_heatmap_json_bytes(year: Optional[int]) -> bytes:
     features.sort(key=lambda f: f["properties"]["intensity"], reverse=True)
 
     response_dict = {
-        "type" : "FeatureCollection",
-        "features" : features,
-        "meta" : {"year": year, "kota_count": len(features), "max_records": max_count},
+        "type": "FeatureCollection",
+        "features": features,
+        "meta": {"year": year, "kota_count": len(features), "max_records": max_count},
     }
-
     return json.dumps(response_dict, ensure_ascii=False).encode("utf-8")
